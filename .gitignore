@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# Claude Code guidance file
+CLAUDE.md
+
 # Archives / Bundles
 *.zip
 *.app/

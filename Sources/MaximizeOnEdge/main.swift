@@ -1,6 +1,13 @@
 import AppKit
 import ApplicationServices
 
+enum ScreenEdge: String {
+    case top = "top"
+    case bottom = "bottom"
+    case left = "left"
+    case right = "right"
+}
+
 final class PreviewView: NSView {
     override var isFlipped: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
@@ -19,8 +26,8 @@ final class SettingsWindowController: NSWindowController {
     private let thresholdSlider = NSSlider(value: 12, minValue: 4, maxValue: 48, target: nil, action: nil)
     private let thresholdValueLabel = NSTextField(labelWithString: "12")
     private let topCheckbox = NSButton(checkboxWithTitle: "上端で最大化", target: nil, action: nil)
-    private let leftCheckbox = NSButton(checkboxWithTitle: "左端で最大化", target: nil, action: nil)
-    private let rightCheckbox = NSButton(checkboxWithTitle: "右端で最大化", target: nil, action: nil)
+    private let leftCheckbox = NSButton(checkboxWithTitle: "左端で左半分にスナップ", target: nil, action: nil)
+    private let rightCheckbox = NSButton(checkboxWithTitle: "右端で右半分にスナップ", target: nil, action: nil)
     private let bottomCheckbox = NSButton(checkboxWithTitle: "下端で最大化", target: nil, action: nil)
     private let previewCheckbox = NSButton(checkboxWithTitle: "プレビューを表示", target: nil, action: nil)
 
@@ -299,15 +306,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let point = NSEvent.mouseLocation
         guard let screen = screenForPoint(point) else { return }
-        let shouldSnap = isInSnapZone || isNearAnyEnabledEdge(point: point, in: screen.frame)
-        NSLog("[MaximizeOnEdge] shouldSnap=\(shouldSnap)")
-        guard shouldSnap else { return }
+        
+        let edge = isInSnapZone ? detectTriggeredEdge(point: point, in: screen.frame) : detectTriggeredEdge(point: point, in: screen.frame)
+        NSLog("[MaximizeOnEdge] triggeredEdge=\(edge?.rawValue ?? "none")")
+        guard let triggeredEdge = edge else { return }
 
-        let targetFrame = screen.visibleFrame
         if let window = observedWindow {
-            maximizeWindow(window: window, toVisibleFrame: targetFrame)
-        } else {
-            maximizeFocusedWindow(toVisibleFrame: targetFrame)
+            snapWindow(window: window, toEdge: triggeredEdge, screen: screen)
+        } else if let focusedWindow = focusedWindow() {
+            snapWindow(window: focusedWindow, toEdge: triggeredEdge, screen: screen)
         }
     }
 
@@ -348,6 +355,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let eBottom = isEnabled("enableBottom", default: true)
         return (eLeft && nearLeft) || (eRight && nearRight) || (eTop && nearTop) || (eBottom && nearBottom)
     }
+    
+    private func detectTriggeredEdge(point: NSPoint, in frame: NSRect) -> ScreenEdge? {
+        let t = currentThreshold()
+        let nearLeft = abs(point.x - frame.minX) <= t
+        let nearRight = abs(point.x - frame.maxX) <= t
+        let nearTop = abs(point.y - frame.maxY) <= t
+        let nearBottom = abs(point.y - frame.minY) <= t
+        
+        if isEnabled("enableLeft", default: true) && nearLeft {
+            return .left
+        } else if isEnabled("enableRight", default: true) && nearRight {
+            return .right
+        } else if isEnabled("enableTop", default: true) && nearTop {
+            return .top
+        } else if isEnabled("enableBottom", default: true) && nearBottom {
+            return .bottom
+        }
+        return nil
+    }
 
     private func focusedWindow() -> AXUIElement? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
@@ -375,6 +401,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         maximizeWindow(window: window, toVisibleFrame: visibleFrame)
     }
 
+    private func snapWindow(window: AXUIElement, toEdge edge: ScreenEdge, screen: NSScreen) {
+        var positionEnabled: DarwinBoolean = true
+        var sizeEnabled: DarwinBoolean = true
+        AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &positionEnabled)
+        AXUIElementIsAttributeSettable(window, kAXSizeAttribute as CFString, &sizeEnabled)
+        NSLog("[MaximizeOnEdge] canSet pos=\(positionEnabled.boolValue) size=\(sizeEnabled.boolValue)")
+        guard positionEnabled.boolValue && sizeEnabled.boolValue else { return }
+
+        let visibleFrame = screen.visibleFrame
+        let maxGlobalY = NSScreen.screens.map { $0.frame.maxY }.max() ?? visibleFrame.maxY
+        
+        var targetPosition: CGPoint
+        var targetSize: CGSize
+        
+        switch edge {
+        case .top, .bottom:
+            // Full maximize for top and bottom edges
+            targetPosition = CGPoint(x: visibleFrame.minX, y: maxGlobalY - visibleFrame.maxY)
+            targetSize = CGSize(width: visibleFrame.width, height: visibleFrame.height)
+            
+        case .left:
+            // Left half of screen
+            targetPosition = CGPoint(x: visibleFrame.minX, y: maxGlobalY - visibleFrame.maxY)
+            targetSize = CGSize(width: visibleFrame.width / 2, height: visibleFrame.height)
+            
+        case .right:
+            // Right half of screen
+            targetPosition = CGPoint(x: visibleFrame.midX, y: maxGlobalY - visibleFrame.maxY)
+            targetSize = CGSize(width: visibleFrame.width / 2, height: visibleFrame.height)
+        }
+        
+        if let positionValue = AXValueCreate(.cgPoint, &targetPosition), 
+           let sizeValue = AXValueCreate(.cgSize, &targetSize) {
+            let r1 = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+            let r2 = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            NSLog("[MaximizeOnEdge] edge=\(edge.rawValue) set pos=\(r1 == .success) size=\(r2 == .success) position=\(targetPosition) size=\(targetSize)")
+        }
+    }
+    
     private func maximizeWindow(window: AXUIElement, toVisibleFrame visibleFrame: NSRect) {
         var positionEnabled: DarwinBoolean = true
         var sizeEnabled: DarwinBoolean = true
@@ -475,7 +540,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPreview(on screen: NSScreen) {
         guard isEnabled("showPreview", default: true) else { return }
-        let frame = screen.visibleFrame
+        
+        let point = NSEvent.mouseLocation
+        let edge = detectTriggeredEdge(point: point, in: screen.frame)
+        
+        var frame = screen.visibleFrame
+        
+        // Adjust preview frame based on edge
+        if let edge = edge {
+            switch edge {
+            case .left:
+                frame.size.width = screen.visibleFrame.width / 2
+            case .right:
+                frame.origin.x = screen.visibleFrame.midX
+                frame.size.width = screen.visibleFrame.width / 2
+            case .top, .bottom:
+                // Full screen for top and bottom
+                break
+            }
+        }
+        
         if previewWindow == nil {
             let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isOpaque = false
