@@ -286,6 +286,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if dx >= 1.0 || dy >= 1.0 { didMoveObservedWindow = true }
         }
 
+        // プレビュー表示は実際にウィンドウが移動した（= タイトルバー等を掴んでドラッグした）場合のみ行う
+        // ウィンドウ内コンテンツのドラッグ（スクロールや選択操作など）ではウィンドウ位置が変わらないため
+        // didMoveObservedWindow が false の間はプレビューを表示しない
+        if !didMoveObservedWindow {
+            if isInSnapZone { hidePreview() }
+            isInSnapZone = false
+            return
+        }
+
         let point = NSEvent.mouseLocation
         guard let screen = screenForPoint(point) else { return }
         let nearAny = isNearAnyEnabledEdge(point: point, in: screen.frame)
